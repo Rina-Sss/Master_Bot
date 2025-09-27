@@ -1,80 +1,73 @@
+from fastapi import FastAPI
 import asyncio
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
+import sqlite3
+import random
+import os
 
-# Токен, который ты получил у @BotFather
-API_TOKEN = "8220290836:AAG7IudopuBPXYlE5hzqc7LY6zRm3h4kOkE"
+TOKEN = "8220290836:AAG7IudopuBPXYlE5hzqc7LY6zRm3h4kOkE"
 
-# Создаём объекты
-bot = Bot(token=API_TOKEN)
+bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# Команда /start (бот сможет реагировать в группе)
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    await message.reply("Привет! Я бот, и я уже умею работать в группе ✨")
-
-# Пример реакции на любое сообщение
-@dp.message()
-async def echo(message: types.Message):
-    # Бот не будет отвечать самому себе
-    if message.from_user.id != (await bot.me()).id:
-        await message.reply(f"Ты написал: {message.text}")
-
-# --- Функция для парсинга и броска ---
-def roll_dice(expr: str) -> str:
-    """
-    Поддерживает форматы: XdY, XdY+Z, XdY-Z
-    Например: 2d6, 1d20+5, 3d10-2
-    """
-    match = re.match(r"(\d*)d(\d+)([+-]\d+)?", expr.strip().lower())
-    if not match:
-        return "❌ Неверный формат. Пример: /roll 2d6"
-
-    num = int(match.group(1)) if match.group(1) else 1  # сколько кубов
-    sides = int(match.group(2))  # граней
-    mod = int(match.group(3)) if match.group(3) else 0  # модификатор
-
-    if num > 100:
-        return "⚠️ Слишком много кубов (максимум 100)."
-
-    rolls = [random.randint(1, sides) for _ in range(num)]
-    total = sum(rolls) + mod
-
-    details = " + ".join(map(str, rolls))
-    if mod:
-        details += f" {'+' if mod > 0 else ''}{mod}"
-    return f"🎲 {expr} → {details} = **{total}**"
-
-# --- Обработчик команды /roll ---
-@dp.message(Command("roll"))
-async def cmd_roll(message: types.Message):
-    args = message.text.split(maxsplit=1)
-    if len(args) == 1:
-        await message.answer("Использование: /roll XdY [+Z/-Z]\nПример: /roll 2d6+3")
-    else:
-        expr = args[1]
-        result = roll_dice(expr)
-        await message.answer(result, parse_mode="Markdown")
-        
-import sqlite3
-
-conn = sqlite3.connect("data.sqlite")
+# --- Setup SQLite ---
+DB_PATH = "data.sqlite"
+conn = sqlite3.connect(DB_PATH)
 cursor = conn.cursor()
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS users (
+cursor.execute("""CREATE TABLE IF NOT EXISTS users (
     user_id INTEGER PRIMARY KEY,
     name TEXT,
     age INTEGER
-)
-""")
+)""")
 conn.commit()
 
+# --- Telegram Handlers ---
+@dp.message(commands=["start"])
+async def start(message: types.Message):
+    await message.answer("Привет! Я бот с кубиком и анкетой!")
 
-# Запуск бота
-async def main():
-    print("Бот запущен...")
+@dp.message(commands=["roll"])
+async def roll(message: types.Message):
+    value = random.randint(1, 6)
+    await message.answer(f"🎲 Выпало: {value}")
+
+@dp.message(commands=["profile"])
+async def profile(message: types.Message):
+    cursor.execute("SELECT name, age FROM users WHERE user_id=?", (message.from_user.id,))
+    user = cursor.fetchone()
+    if user:
+        await message.answer(f"Ваш профиль:\nИмя: {user[0]}\nВозраст: {user[1]}")
+    else:
+        await message.answer("Профиль не найден. Используй /setprofile")
+
+@dp.message(commands=["setprofile"])
+async def setprofile(message: types.Message):
+    args = message.text.split(maxsplit=2)
+    if len(args) < 3:
+        await message.answer("Используй: /setprofile <Имя> <Возраст>")
+        return
+    name, age = args[1], args[2]
+    cursor.execute(
+        "INSERT OR REPLACE INTO users (user_id, name, age) VALUES (?, ?, ?)",
+        (message.from_user.id, name, age)
+    )
+    conn.commit()
+    await message.answer("Профиль сохранён!")
+
+# --- FastAPI для ping ---
+app = FastAPI()
+
+@app.get("/")
+async def ping():
+    return {"status": "Bot is running"}
+
+# --- Telegram Polling ---
+async def run_bot():
     await dp.start_polling(bot)
 
+# --- Main ---
 if __name__ == "__main__":
-    asyncio.run(main())
+    import uvicorn
+    loop = asyncio.get_event_loop()
+    loop.create_task(run_bot())
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
