@@ -1,73 +1,37 @@
-from fastapi import FastAPI
-import asyncio
 from aiogram import Bot, Dispatcher, types
-import sqlite3
-import random
+from aiogram.filters import Command
+from fastapi import FastAPI
+from mangum import Mangum  # Для совместимости с Render, если нужен HTTP адаптер
+import asyncio
 import os
 
-TOKEN = "8220290836:AAG7IudopuBPXYlE5hzqc7LY6zRm3h4kOkE"
+# Токен бота
+BOT_TOKEN = os.getenv("8220290836:AAG7IudopuBPXYlE5hzqc7LY6zRm3h4kOkE")  # Установи его в Render environment variables
 
-bot = Bot(token=TOKEN)
+# Инициализация бота и диспетчера
+bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# --- Setup SQLite ---
-DB_PATH = "data.sqlite"
-conn = sqlite3.connect(DB_PATH)
-cursor = conn.cursor()
-cursor.execute("""CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER PRIMARY KEY,
-    name TEXT,
-    age INTEGER
-)""")
-conn.commit()
-
-# --- Telegram Handlers ---
-@dp.message(commands=["start"])
-async def start(message: types.Message):
-    await message.answer("Привет! Я бот с кубиком и анкетой!")
-
-@dp.message(commands=["roll"])
-async def roll(message: types.Message):
-    value = random.randint(1, 6)
-    await message.answer(f"🎲 Выпало: {value}")
-
-@dp.message(commands=["profile"])
-async def profile(message: types.Message):
-    cursor.execute("SELECT name, age FROM users WHERE user_id=?", (message.from_user.id,))
-    user = cursor.fetchone()
-    if user:
-        await message.answer(f"Ваш профиль:\nИмя: {user[0]}\nВозраст: {user[1]}")
-    else:
-        await message.answer("Профиль не найден. Используй /setprofile")
-
-@dp.message(commands=["setprofile"])
-async def setprofile(message: types.Message):
-    args = message.text.split(maxsplit=2)
-    if len(args) < 3:
-        await message.answer("Используй: /setprofile <Имя> <Возраст>")
-        return
-    name, age = args[1], args[2]
-    cursor.execute(
-        "INSERT OR REPLACE INTO users (user_id, name, age) VALUES (?, ?, ?)",
-        (message.from_user.id, name, age)
-    )
-    conn.commit()
-    await message.answer("Профиль сохранён!")
-
-# --- FastAPI для ping ---
+# FastAPI для проверки, что бот работает
 app = FastAPI()
 
-@app.get("/")
+@app.get("/ping")
 async def ping():
-    return {"status": "Bot is running"}
+    return {"status": "ok"}
 
-# --- Telegram Polling ---
-async def run_bot():
-    await dp.start_polling(bot)
+# Хэндлер команды /start
+@dp.message(Command("start"))
+async def start_handler(message: types.Message):
+    await message.answer("Привет! Бот запущен и работает!")
 
-# --- Main ---
+# Фоновая функция запуска бота
+async def main():
+    # Запуск long-polling
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await bot.session.close()
+
+# Запуск asyncio loop для Render
 if __name__ == "__main__":
-    import uvicorn
-    loop = asyncio.get_event_loop()
-    loop.create_task(run_bot())
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+    asyncio.run(main())
