@@ -3,6 +3,7 @@ import re
 import json
 import random
 import sqlite3
+import asyncio
 from flask import Flask, request, Response
 from telegram import Bot, Update
 
@@ -16,6 +17,19 @@ if not BOT_TOKEN:
 
 bot = Bot(token=BOT_TOKEN)
 app = Flask(__name__)
+
+# ---------- helper to run async Bot coroutines from sync code ----------
+def run_coro(coro):
+    """
+    Run coroutine from synchronous context.
+    If an event loop is running, create a task; otherwise run asyncio.run.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    else:
+        return asyncio.create_task(coro)
 
 # ---------- DB helpers ----------
 def init_db():
@@ -104,24 +118,26 @@ def roll_expression(expr: str):
 # ---------- Command handlers ----------
 def handle_start(update: Update):
     chat_id = update.effective_chat.id
-    bot.send_message(
-        chat_id=chat_id,
-        text="Привет! Я RPG-бот.\n/roll 2d20 — бросок кубиков\n/анкета — показать свою анкету\n/анкета @username — показать чужую анкету"
-    )
+    run_coro(bot.send_message(chat_id=chat_id, text=(
+        "Привет! Я RPG-бот.\n"
+        "/roll 2d20 — бросок кубиков\n"
+        "/анкета — показать свою анкету\n"
+        "/анкета @username — показать чужую анкету"
+    )))
 
 def handle_roll(update: Update):
     chat_id = update.effective_chat.id
     text = (update.message.text or "").strip()
     parts = text.split()
     if len(parts) < 2:
-        bot.send_message(chat_id=chat_id, text="Использование: /roll 2d20")
+        run_coro(bot.send_message(chat_id=chat_id, text="Использование: /roll 2d20"))
         return
     expr = parts[1]
     rolls = roll_expression(expr)
     if rolls is None:
-        bot.send_message(chat_id=chat_id, text="Неверный формат или слишком большие числа. Пример: /roll 2d20")
+        run_coro(bot.send_message(chat_id=chat_id, text="Неверный формат или слишком большие числа. Пример: /roll 2d20"))
         return
-    bot.send_message(chat_id=chat_id, text=f"🎲 {expr}: {rolls} — сумма {sum(rolls)}")
+    run_coro(bot.send_message(chat_id=chat_id, text=f"🎲 {expr}: {rolls} — сумма {sum(rolls)}"))
 
 def handle_profile(update: Update):
     chat_id = update.effective_chat.id
@@ -135,14 +151,14 @@ def handle_profile(update: Update):
         r = cur.fetchone()
         conn.close()
         if not r:
-            bot.send_message(chat_id=chat_id, text="Анкета не найдена.")
+            run_coro(bot.send_message(chat_id=chat_id, text="Анкета не найдена."))
             return
         prof = get_profile(r[0])
     else:
         user = update.effective_user
         prof = get_profile(user.id)
         if not prof:
-            bot.send_message(chat_id=chat_id, text="У тебя ещё нет анкеты. Пока можно создать локально или через отдельную команду/диалог (реализацию можно добавить).")
+            run_coro(bot.send_message(chat_id=chat_id, text="У тебя ещё нет анкеты. Пока можно создать локально или через отдельную команду/диалог (реализацию можно добавить)."))
             return
     text_out = (
         f"Имя: {prof.get('name') or '-'}\n"
@@ -152,9 +168,9 @@ def handle_profile(update: Update):
         f"Предыстория:\n{prof.get('bio') or '-'}"
     )
     if prof.get("photo_id"):
-        bot.send_photo(chat_id=chat_id, photo=prof.get("photo_id"), caption=text_out)
+        run_coro(bot.send_photo(chat_id=chat_id, photo=prof.get("photo_id"), caption=text_out))
     else:
-        bot.send_message(chat_id=chat_id, text=text_out)
+        run_coro(bot.send_message(chat_id=chat_id, text=text_out))
 
 # Quick JSON save (admin helper)
 def handle_json_commands(update: Update):
@@ -166,12 +182,12 @@ def handle_json_commands(update: Update):
             obj = json.loads(text)
             data = obj.get("save_profile")
             if not data or not data.get("user_id"):
-                bot.send_message(chat_id=update.effective_chat.id, text="Некорректный JSON или отсутствует user_id")
+                run_coro(bot.send_message(chat_id=update.effective_chat.id, text="Некорректный JSON или отсутствует user_id"))
                 return
             save_profile(data)
-            bot.send_message(chat_id=update.effective_chat.id, text="Анкета сохранена.")
+            run_coro(bot.send_message(chat_id=update.effective_chat.id, text="Анкета сохранена."))
         except Exception as e:
-            bot.send_message(chat_id=update.effective_chat.id, text=f"Ошибка парсинга JSON: {e}")
+            run_coro(bot.send_message(chat_id=update.effective_chat.id, text=f"Ошибка парсинга JSON: {e}"))
 
 # Callback query handler skeleton
 def handle_callback_query(update: Update):
@@ -179,7 +195,7 @@ def handle_callback_query(update: Update):
     if not cq:
         return
     try:
-        bot.answer_callback_query(cq.id)
+        run_coro(bot.answer_callback_query(cq.id))
     except:
         pass
     data = cq.data or ""
@@ -192,21 +208,21 @@ def handle_callback_query(update: Update):
         prof = get_profile(uid)
         if not prof:
             try:
-                bot.edit_message_text(chat_id=cq.message.chat_id, message_id=cq.message.message_id, text="Анкета не найдена.")
+                run_coro(bot.edit_message_text(chat_id=cq.message.chat_id, message_id=cq.message.message_id, text="Анкета не найдена."))
             except:
                 pass
             return
         if kind == "inv":
             inv = prof.get("inventory") or []
             text = "Инвентарь:\n" + ("\n".join(f"- {i}" for i in inv) if inv else "Пусто")
-            bot.edit_message_text(chat_id=cq.message.chat_id, message_id=cq.message.message_id, text=text)
+            run_coro(bot.edit_message_text(chat_id=cq.message.chat_id, message_id=cq.message.message_id, text=text))
         elif kind == "stats":
             stats = prof.get("stats") or {}
             text = "Статистика:\n" + ("\n".join(f"{k}: {v}" for k,v in stats.items()) if stats else "Нет")
-            bot.edit_message_text(chat_id=cq.message.chat_id, message_id=cq.message.message_id, text=text)
+            run_coro(bot.edit_message_text(chat_id=cq.message.chat_id, message_id=cq.message.message_id, text=text))
     else:
         try:
-            bot.edit_message_text(chat_id=cq.message.chat_id, message_id=cq.message.message_id, text="Нажата кнопка")
+            run_coro(bot.edit_message_text(chat_id=cq.message.chat_id, message_id=cq.message.message_id, text="Нажата кнопка"))
         except:
             pass
 
@@ -223,11 +239,12 @@ def webhook():
     try:
         if update.message:
             text = update.message.text or ""
-            if text.startswith("/start"):
+            # handle commands sent in groups with @BotUsername
+            if text.startswith("/start") or text.startswith("/start@"):
                 handle_start(update)
-            elif text.startswith("/roll"):
+            elif text.startswith("/roll") or "/roll@" in text:
                 handle_roll(update)
-            elif text.startswith("/анкета"):
+            elif text.startswith("/анкета") or "/анкета@" in text:
                 handle_profile(update)
             else:
                 handle_json_commands(update)
