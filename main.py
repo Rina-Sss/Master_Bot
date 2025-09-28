@@ -4,6 +4,7 @@ import json
 import random
 import sqlite3
 import asyncio
+import traceback
 from flask import Flask, request, Response
 from telegram import Bot, Update
 
@@ -118,59 +119,72 @@ def roll_expression(expr: str):
 # ---------- Command handlers ----------
 def handle_start(update: Update):
     chat_id = update.effective_chat.id
-    run_coro(bot.send_message(chat_id=chat_id, text=(
-        "Привет! Я RPG-бот.\n"
-        "/roll 2d20 — бросок кубиков\n"
-        "/анкета — показать свою анкету\n"
-        "/анкета @username — показать чужую анкету"
-    )))
+    try:
+        run_coro(bot.send_message(chat_id=chat_id, text=(
+            "Привет! Я RPG-бот.\n"
+            "/roll 2d20 — бросок кубиков\n"
+            "/анкета — показать свою анкету\n"
+            "/анкета @username — показать чужую анкету"
+        )))
+    except Exception:
+        print("Error in handle_start:", traceback.format_exc())
 
-def handle_roll(update: Update):
+def handle_roll(update: Update, expr_arg=None):
     chat_id = update.effective_chat.id
-    text = (update.message.text or "").strip()
-    parts = text.split()
-    if len(parts) < 2:
-        run_coro(bot.send_message(chat_id=chat_id, text="Использование: /roll 2d20"))
-        return
-    expr = parts[1]
-    rolls = roll_expression(expr)
-    if rolls is None:
-        run_coro(bot.send_message(chat_id=chat_id, text="Неверный формат или слишком большие числа. Пример: /roll 2d20"))
-        return
-    run_coro(bot.send_message(chat_id=chat_id, text=f"🎲 {expr}: {rolls} — сумма {sum(rolls)}"))
+    try:
+        text = (update.message.text or "").strip()
+        parts = text.split()
+        expr = None
+        if expr_arg:
+            expr = expr_arg
+        elif len(parts) >= 2:
+            expr = parts[1]
+        if not expr:
+            run_coro(bot.send_message(chat_id=chat_id, text="Использование: /roll 2d20"))
+            return
+        rolls = roll_expression(expr)
+        if rolls is None:
+            run_coro(bot.send_message(chat_id=chat_id, text="Неверный формат или слишком большие числа. Пример: /roll 2d20"))
+            return
+        run_coro(bot.send_message(chat_id=chat_id, text=f"🎲 {expr}: {rolls} — сумма {sum(rolls)}"))
+    except Exception:
+        print("Error in handle_roll:", traceback.format_exc())
 
 def handle_profile(update: Update):
     chat_id = update.effective_chat.id
-    text = (update.message.text or "").strip()
-    parts = text.split()
-    if len(parts) > 1:
-        target = parts[1].lstrip("@")
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute("SELECT user_id FROM profiles WHERE username = ?", (target,))
-        r = cur.fetchone()
-        conn.close()
-        if not r:
-            run_coro(bot.send_message(chat_id=chat_id, text="Анкета не найдена."))
-            return
-        prof = get_profile(r[0])
-    else:
-        user = update.effective_user
-        prof = get_profile(user.id)
-        if not prof:
-            run_coro(bot.send_message(chat_id=chat_id, text="У тебя ещё нет анкеты. Пока можно создать локально или через отдельную команду/диалог (реализацию можно добавить)."))
-            return
-    text_out = (
-        f"Имя: {prof.get('name') or '-'}\n"
-        f"Возраст: {prof.get('age') or '-'}\n"
-        f"Роль: {prof.get('role') or '-'}\n"
-        f"Опыт: {prof.get('exp')}\n\n"
-        f"Предыстория:\n{prof.get('bio') or '-'}"
-    )
-    if prof.get("photo_id"):
-        run_coro(bot.send_photo(chat_id=chat_id, photo=prof.get("photo_id"), caption=text_out))
-    else:
-        run_coro(bot.send_message(chat_id=chat_id, text=text_out))
+    try:
+        text = (update.message.text or "").strip()
+        parts = text.split()
+        if len(parts) > 1:
+            target = parts[1].lstrip("@")
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute("SELECT user_id FROM profiles WHERE username = ?", (target,))
+            r = cur.fetchone()
+            conn.close()
+            if not r:
+                run_coro(bot.send_message(chat_id=chat_id, text="Анкета не найдена."))
+                return
+            prof = get_profile(r[0])
+        else:
+            user = update.effective_user
+            prof = get_profile(user.id)
+            if not prof:
+                run_coro(bot.send_message(chat_id=chat_id, text="У тебя ещё нет анкеты. Пока можно создать локально или через отдельную команду/диалог (реализацию можно добавить)."))
+                return
+        text_out = (
+            f"Имя: {prof.get('name') or '-'}\n"
+            f"Возраст: {prof.get('age') or '-'}\n"
+            f"Роль: {prof.get('role') or '-'}\n"
+            f"Опыт: {prof.get('exp')}\n\n"
+            f"Предыстория:\n{prof.get('bio') or '-'}"
+        )
+        if prof.get("photo_id"):
+            run_coro(bot.send_photo(chat_id=chat_id, photo=prof.get("photo_id"), caption=text_out))
+        else:
+            run_coro(bot.send_message(chat_id=chat_id, text=text_out))
+    except Exception:
+        print("Error in handle_profile:", traceback.format_exc())
 
 # Quick JSON save (admin helper)
 def handle_json_commands(update: Update):
@@ -196,8 +210,8 @@ def handle_callback_query(update: Update):
         return
     try:
         run_coro(bot.answer_callback_query(cq.id))
-    except:
-        pass
+    except Exception:
+        print("Error answering callback:", traceback.format_exc())
     data = cq.data or ""
     if ":" in data:
         kind, uid_s = data.split(":", 1)
@@ -231,30 +245,52 @@ def handle_callback_query(update: Update):
 def webhook():
     try:
         data = request.get_json(force=True)
+    except Exception as e:
+        print("Invalid JSON in request:", e)
+        return Response("Bad Request", status=400)
+
+    # Debug: log incoming update JSON for diagnosis (will appear in Render logs)
+    try:
         print("INCOMING UPDATE:", json.dumps(data, ensure_ascii=False))
+    except Exception:
+        print("INCOMING UPDATE: <could not serialize update>")
+
+    try:
         update = Update.de_json(data, bot)
     except Exception as e:
-        print("Invalid update received:", e)
+        print("Failed to parse Update:", e)
         return Response("Bad Request", status=400)
 
     try:
+        # Only handle messages and callback_query for now
         if update.message:
-            text = update.message.text or ""
-            # handle commands sent in groups with @BotUsername
-            if text.startswith("/start") or text.startswith("/start@"):
+            # Robust command parsing: support /cmd and /cmd@BotUsername
+            text = (update.message.text or "").strip()
+            cmd = ""
+            args = []
+            if text:
+                parts = text.split()
+                cmd = parts[0].split("@")[0]  # "/roll" or "/roll@Bot"
+                args = parts[1:]
+            # Dispatch
+            if cmd == "/start":
                 handle_start(update)
-            elif text.startswith("/roll") or "/roll@" in text:
-                handle_roll(update)
-            elif text.startswith("/анкета") or "/анкета@" in text:
+            elif cmd == "/roll":
+                # Pass explicit arg if present (args[0]) to handle_roll
+                expr_arg = args[0] if args else None
+                handle_roll(update, expr_arg=expr_arg)
+            elif cmd == "/анкета":
                 handle_profile(update)
             else:
+                # Non-command messages: support quick JSON admin helper
                 handle_json_commands(update)
         elif update.callback_query:
             handle_callback_query(update)
         else:
+            # ignored update types (edited_message, channel_post, etc.)
             pass
-    except Exception as e:
-        print("Error handling update:", e)
+    except Exception:
+        print("Error handling update:", traceback.format_exc())
 
     return Response("OK", status=200)
 
@@ -266,4 +302,5 @@ def index():
 # ---------- Start ----------
 if __name__ == "__main__":
     init_db()
+    # For Render this simple flask run works; for production consider gunicorn/uvicorn
     app.run(host="0.0.0.0", port=PORT)
