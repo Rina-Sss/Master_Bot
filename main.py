@@ -23,7 +23,7 @@ bot = Bot(token=BOT_TOKEN)
 app = Flask(__name__)
 
 # ---------- Background worker loop + concurrency control ----------
-OUTBOUND_SEMAPHORE = asyncio.Semaphore(10)  # tune as needed
+OUTBOUND_SEMAPHORE = asyncio.Semaphore(10)
 
 _WORKER_LOOP = asyncio.new_event_loop()
 _WORKER_THREAD = threading.Thread(target=lambda: _WORKER_LOOP.run_forever(), daemon=True)
@@ -54,6 +54,34 @@ def reply(update: Update, text=None, photo=None, reply_markup=None, **kwargs):
         run_coro(bot.send_photo(chat_id=chat_id, photo=photo, caption=text, reply_markup=reply_markup, message_thread_id=thread_id, **kwargs))
     else:
         run_coro(bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, message_thread_id=thread_id, **kwargs))
+
+# ---------- Dice parser ----------
+def roll_expression(expr: str):
+    expr = expr.strip().lower()
+    m = re.match(r"^(\d+)d(\d+)$", expr)
+    if not m:
+        return None
+    count, sides = int(m.group(1)), int(m.group(2))
+    if count < 1 or count > 100 or sides < 2 or sides > 1000:
+        return None
+    rolls = [random.randint(1, sides) for _ in range(count)]
+    return rolls
+
+def handle_roll(update: Update, expr_arg=None):
+    try:
+        text = (update.message.text or "").strip()
+        parts = text.split()
+        expr = expr_arg or (parts[1] if len(parts) > 1 else None)
+        if not expr:
+            reply(update, text="Использование: /roll 2d20")
+            return
+        rolls = roll_expression(expr)
+        if rolls is None:
+            reply(update, text="Неверный формат. Пример: /roll 2d20")
+            return
+        reply(update, text=f"🎲 {expr}: {rolls} → сумма {sum(rolls)}")
+    except Exception:
+        print("Error in handle_roll:", traceback.format_exc())
 
 # ---------- DB helpers ----------
 def init_db():
@@ -154,7 +182,7 @@ def parse_setanketa_text(text: str):
         "exp": ["опыт", "exp", "experience"]
     }
     out = {}
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    lines = [ln.rstrip() for ln in text.splitlines() if ln.strip()]
     if lines and re.match(r"^/?setanketa\b", lines[0], flags=re.I):
         lines = lines[1:]
     curr_key = None
@@ -211,7 +239,7 @@ def profile_buttons(user_id):
 def back_button(user_id):
     return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"back:{user_id}")]])
 
-# ---------- Display helpers ----------
+# ---------- Display helpers (with "Нет данных" fallback) ----------
 def short_profile_text(prof):
     name = prof.get("name") or "-"
     age = prof.get("age") or "-"
@@ -219,21 +247,23 @@ def short_profile_text(prof):
     return f"Имя: {name}\nВозраст: {age}\nРоль: {role}"
 
 def exp_text(prof):
-    return f"Опыт: {prof.get('exp', 0)}"
+    val = prof.get('exp', 0)
+    return f"Опыт: {val}" if val else "Опыт: Нет данных"
 
 def stats_text(prof):
     stats = prof.get("stats") or {}
     if not stats:
-        return "Характеристики: —"
+        return "Характеристики: Нет данных"
     return "Характеристики:\n" + "\n".join(f"{k}: {v}" for k, v in stats.items())
 
 def bio_text(prof):
-    return f"Биография:\n{prof.get('bio') or '-'}"
+    b = prof.get('bio')
+    return f"Биография:\n{b}" if b else "Биография: Нет данных"
 
 def inv_text(prof):
     inv = prof.get("inventory") or []
     if not inv:
-        return "Инвентарь: пусто"
+        return "Инвентарь: Нет данных"
     return "Инвентарь:\n" + "\n".join(f"- {i}" for i in inv)
 
 # ---------- Command handlers ----------
@@ -242,7 +272,8 @@ def handle_start(update: Update):
         reply(update, text=(
             "Привет! Я RPG-бот.\n"
             "/anketa — показать свою анкету или чужую: /anketa @username\n"
-            "/setanketa — создать или обновить свою анкету (см. формат)\n\n"
+            "/setanketa — создать или обновить свою анкету (см. формат)\n"
+            "/roll 2d20 — бросок кубиков\n\n"
             "Формат /setanketa (пример):\n"
             "/setanketa\n"
             "Имя: Лира\n"
@@ -373,6 +404,7 @@ def handle_callback_query(update: Update):
                 content = "Неизвестная команда."
                 markup = back_button(uid)
             if has_photo:
+                # prefer editing caption for messages with photo
                 run_coro(bot.edit_message_caption(chat_id=cq.message.chat.id, message_id=cq.message.message_id, caption=content, reply_markup=markup))
             else:
                 run_coro(bot.edit_message_text(chat_id=cq.message.chat.id, message_id=cq.message.message_id, text=content, reply_markup=markup))
@@ -403,24 +435,25 @@ def webhook():
         return Response("Bad Request", status=400)
     try:
         if update.message:
-            # choose handler by message content and type
-            if update.message.photo and (update.message.caption is None or update.message.caption.strip().lower().startswith("/setanketa") is False):
-                # If photo without setanketa caption, treat as profile photo save
+            # photo handling: if a photo exists, treat as profile photo save
+            if update.message.photo:
                 handle_photo(update)
             text = (update.message.text or "") if update.message.text else ""
             text = text.strip()
             if text:
                 parts = text.split()
                 cmd = parts[0].split("@")[0]
+                args = parts[1:]
                 if cmd == "/start":
                     handle_start(update)
-                elif cmd == "/setanketa" or cmd.lower() == "/setanketa":
+                elif cmd.lower() == "/setanketa":
                     handle_setanketa(update)
                 elif cmd == "/anketa":
                     handle_anketa(update)
+                elif cmd == "/roll":
+                    expr_arg = args[0] if args else None
+                    handle_roll(update, expr_arg=expr_arg)
                 else:
-                    # If message contains JSON or admin commands
-                    # keep backward compatibility: simple JSON save via message body
                     if text.startswith("{") and "save_profile" in text:
                         try:
                             obj = json.loads(text)
@@ -432,12 +465,6 @@ def webhook():
                                 reply(update, text="Анкета сохранена.")
                         except Exception as e:
                             reply(update, text=f"Ошибка парсинга JSON: {e}")
-                    else:
-                        # ignore other texts
-                        pass
-            else:
-                # no text; might be photo handled above
-                pass
         elif update.callback_query:
             handle_callback_query(update)
         else:
