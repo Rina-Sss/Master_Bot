@@ -231,6 +231,7 @@ def handle_callback_query(update: Update):
 def webhook():
     try:
         data = request.get_json(force=True)
+        print("INCOMING UPDATE:", json.dumps(data, ensure_ascii=False))
         update = Update.de_json(data, bot)
     except Exception as e:
         print("Invalid update received:", e)
