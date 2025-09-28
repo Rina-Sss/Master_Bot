@@ -17,7 +17,7 @@ if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN not set in environment variables")
 
 # Semaphore to limit concurrent outbound requests to Telegram
-OUTBOUND_SEMAPHORE = asyncio.Semaphore(10)  # start conservative, increase if needed
+OUTBOUND_SEMAPHORE = asyncio.Semaphore(4)  # conservative; increase later if stable
 
 # Create Bot using library default Request implementation
 bot = Bot(token=BOT_TOKEN)
@@ -27,35 +27,18 @@ app = Flask(__name__)
 # ---------- helper to run async Bot coroutines from sync code ----------
 def run_coro(coro):
     """
-    Robust runner for coroutines from sync code.
-    - If a running loop exists and is usable, schedule a background task.
-    - If no running loop or loop is closed, create a temporary loop,
-      run coroutine to completion, then close that loop.
-    This avoids "Event loop is closed" errors on process restarts.
+    Simple, robust runner: always run coroutine to completion on a fresh loop.
+    This blocks the current thread while the request is sent to Telegram,
+    but avoids errors related to a closed or unusable event loop.
     """
-    async def _with_sem():
+    async def _run():
         async with OUTBOUND_SEMAPHORE:
             return await coro
 
-    # Try get running loop
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-
-    if loop and not loop.is_closed():
-        # schedule as background task
-        try:
-            return asyncio.create_task(_with_sem())
-        except RuntimeError:
-            # fallback to temporary loop if scheduling fails
-            pass
-
-    # No running loop or it's closed: create temporary loop and run the coro
     new_loop = asyncio.new_event_loop()
     try:
         asyncio.set_event_loop(new_loop)
-        return new_loop.run_until_complete(_with_sem())
+        return new_loop.run_until_complete(_run())
     finally:
         try:
             new_loop.close()
