@@ -19,27 +19,18 @@ if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN not set in environment variables")
 
 # ---------- Bot ----------
-# Create Bot using library default Request implementation
 bot = Bot(token=BOT_TOKEN)
 
 app = Flask(__name__)
 
 # ---------- Background worker loop + concurrency control ----------
-# Semaphore to limit concurrent outbound requests to Telegram inside worker loop
 OUTBOUND_SEMAPHORE = asyncio.Semaphore(10)  # tune as needed
 
-# Persistent background asyncio loop running in a dedicated thread
 _WORKER_LOOP = asyncio.new_event_loop()
 _WORKER_THREAD = threading.Thread(target=lambda: _WORKER_LOOP.run_forever(), daemon=True)
 _WORKER_THREAD.start()
 
 def run_coro(coro, wait=False, timeout=15):
-    """
-    Submit coroutine to the persistent background asyncio loop.
-    - wait=False (default): schedule and return concurrent.futures.Future immediately.
-    - wait=True: block until result or timeout seconds and return result (or raise).
-    All coroutines are wrapped with a semaphore to limit concurrency.
-    """
     async def _with_sem():
         async with OUTBOUND_SEMAPHORE:
             return await coro
@@ -52,6 +43,21 @@ def run_coro(coro, wait=False, timeout=15):
             fut.cancel()
             raise
     return fut
+
+# ---------- Convenience reply helper (preserves forum thread) ----------
+def reply(update: Update, text=None, photo=None, **kwargs):
+    chat_id = update.effective_chat.id
+    # thread id may be present on forum messages
+    thread_id = None
+    try:
+        thread_id = getattr(update.message, "message_thread_id", None)
+    except Exception:
+        thread_id = None
+    if photo:
+        # send_photo supports message_thread_id
+        run_coro(bot.send_photo(chat_id=chat_id, photo=photo, caption=text, message_thread_id=thread_id, **kwargs))
+    else:
+        run_coro(bot.send_message(chat_id=chat_id, text=text, message_thread_id=thread_id, **kwargs))
 
 # ---------- DB helpers ----------
 def init_db():
@@ -135,20 +141,19 @@ def roll_expression(expr: str):
 
 # ---------- Command handlers ----------
 def handle_start(update: Update):
-    chat_id = update.effective_chat.id
     try:
-        run_coro(bot.send_message(chat_id=chat_id, text=(
+        reply(update, text=(
             "Привет! Я RPG-бот.\n"
             "/roll 2d20 — бросок кубиков\n"
             "/анкета — показать свою анкету\n"
             "/анкета @username — показать чужую анкету"
-        )))
+        ))
     except Exception:
         print("Error in handle_start:", traceback.format_exc())
 
 def handle_roll(update: Update, expr_arg=None):
-    chat_id = update.effective_chat.id
     try:
+        chat_id = update.effective_chat.id
         text = (update.message.text or "").strip()
         parts = text.split()
         expr = None
@@ -157,19 +162,17 @@ def handle_roll(update: Update, expr_arg=None):
         elif len(parts) >= 2:
             expr = parts[1]
         if not expr:
-            run_coro(bot.send_message(chat_id=chat_id, text="Использование: /roll 2d20"))
+            reply(update, text="Использование: /roll 2d20")
             return
         rolls = roll_expression(expr)
         if rolls is None:
-            run_coro(bot.send_message(chat_id=chat_id, text="Неверный формат или слишком большие числа. Пример: /roll 2d20"))
+            reply(update, text="Неверный формат или слишком большие числа. Пример: /roll 2d20")
             return
-        # Schedule send_message in background worker; no blocking by default
-        run_coro(bot.send_message(chat_id=chat_id, text=f"🎲 {expr}: {rolls} — сумма {sum(rolls)}"))
+        reply(update, text=f"🎲 {expr}: {rolls} — сумма {sum(rolls)}")
     except Exception:
         print("Error in handle_roll:", traceback.format_exc())
 
 def handle_profile(update: Update):
-    chat_id = update.effective_chat.id
     try:
         text = (update.message.text or "").strip()
         parts = text.split()
@@ -181,14 +184,14 @@ def handle_profile(update: Update):
             r = cur.fetchone()
             conn.close()
             if not r:
-                run_coro(bot.send_message(chat_id=chat_id, text="Анкета не найдена."))
+                reply(update, text="Анкета не найдена.")
                 return
             prof = get_profile(r[0])
         else:
             user = update.effective_user
             prof = get_profile(user.id)
             if not prof:
-                run_coro(bot.send_message(chat_id=chat_id, text="У тебя ещё нет анкеты. Пока можно создать локально или через отдельную команду/диалог (реализацию можно добавить)."))
+                reply(update, text="У тебя ещё нет анкеты. Пока можно создать локально или через отдельную команду/диалог (реализацию можно добавить).")
                 return
         text_out = (
             f"Имя: {prof.get('name') or '-'}\n"
@@ -198,9 +201,9 @@ def handle_profile(update: Update):
             f"Предыстория:\n{prof.get('bio') or '-'}"
         )
         if prof.get("photo_id"):
-            run_coro(bot.send_photo(chat_id=chat_id, photo=prof.get("photo_id"), caption=text_out))
+            reply(update, text=text_out, photo=prof.get("photo_id"))
         else:
-            run_coro(bot.send_message(chat_id=chat_id, text=text_out))
+            reply(update, text=text_out)
     except Exception:
         print("Error in handle_profile:", traceback.format_exc())
 
@@ -214,12 +217,12 @@ def handle_json_commands(update: Update):
             obj = json.loads(text)
             data = obj.get("save_profile")
             if not data or not data.get("user_id"):
-                run_coro(bot.send_message(chat_id=update.effective_chat.id, text="Некорректный JSON или отсутствует user_id"))
+                reply(update, text="Некорректный JSON или отсутствует user_id")
                 return
             save_profile(data)
-            run_coro(bot.send_message(chat_id=update.effective_chat.id, text="Анкета сохранена."))
+            reply(update, text="Анкета сохранена.")
         except Exception as e:
-            run_coro(bot.send_message(chat_id=update.effective_chat.id, text=f"Ошибка парсинга JSON: {e}"))
+            reply(update, text=f"Ошибка парсинга JSON: {e}")
 
 # Callback query handler skeleton
 def handle_callback_query(update: Update):
