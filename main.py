@@ -7,6 +7,7 @@ import asyncio
 import traceback
 from flask import Flask, request, Response
 from telegram import Bot, Update
+from telegram.request import Request
 
 # ---------- CONFIG ----------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -16,21 +17,47 @@ DB_PATH = "profiles.db"
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN not set in environment variables")
 
-bot = Bot(token=BOT_TOKEN)
+# ---------- Telegram Request / pool settings ----------
+# Tune these values as needed: pool size should be >= max concurrent outbound requests
+REQUEST_POOL_SIZE = 40
+REQUEST_POOL_TIMEOUT = 60  # seconds to wait for a free connection in pool
+REQUEST_CONNECT_TIMEOUT = 10.0
+REQUEST_READ_TIMEOUT = 30.0
+
+# Create a Request object with larger pool and timeouts
+request_session = Request(
+    con_pool_size=REQUEST_POOL_SIZE,
+    pool_timeout=REQUEST_POOL_TIMEOUT,
+    connect_timeout=REQUEST_CONNECT_TIMEOUT,
+    read_timeout=REQUEST_READ_TIMEOUT
+)
+
+# Semaphore to limit concurrent outbound requests to Telegram
+OUTBOUND_SEMAPHORE = asyncio.Semaphore(20)  # tune between 10..40 depending on load
+
+# Create Bot with custom Request
+bot = Bot(token=BOT_TOKEN, request=request_session)
+
 app = Flask(__name__)
 
 # ---------- helper to run async Bot coroutines from sync code ----------
 def run_coro(coro):
     """
-    Run coroutine from synchronous context.
-    If an event loop is running, create a task; otherwise run asyncio.run.
+    Run coroutine from synchronous context with an outbound semaphore.
+    If an event loop is running, schedule a task; otherwise run and wait.
     """
+    async def _with_sem():
+        async with OUTBOUND_SEMAPHORE:
+            return await coro
+
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        return asyncio.run(coro)
+        # No running loop in this thread — run to completion
+        return asyncio.run(_with_sem())
     else:
-        return asyncio.create_task(coro)
+        # Schedule a background task on the running loop
+        return asyncio.create_task(_with_sem())
 
 # ---------- DB helpers ----------
 def init_db():
@@ -270,13 +297,12 @@ def webhook():
             args = []
             if text:
                 parts = text.split()
-                cmd = parts[0].split("@")[0]  # "/roll" or "/roll@Bot"
+                cmd = parts[0].split("@")[0]
                 args = parts[1:]
             # Dispatch
             if cmd == "/start":
                 handle_start(update)
             elif cmd == "/roll":
-                # Pass explicit arg if present (args[0]) to handle_roll
                 expr_arg = args[0] if args else None
                 handle_roll(update, expr_arg=expr_arg)
             elif cmd == "/анкета":
