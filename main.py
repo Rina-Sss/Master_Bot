@@ -144,7 +144,6 @@ def update_photo(user_id, username, photo_id, ts=None):
 
 # ---------- Utilities: parsing setanketa text ----------
 def parse_setanketa_text(text: str):
-    # Accept lines like "Имя: Лира" or "Name: Lira"
     keys = {
         "name": ["имя", "name"],
         "age": ["возраст", "age"],
@@ -155,11 +154,9 @@ def parse_setanketa_text(text: str):
         "exp": ["опыт", "exp", "experience"]
     }
     out = {}
-    # Split by lines; ignore first line if it's the command
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     if lines and re.match(r"^/?setanketa\b", lines[0], flags=re.I):
         lines = lines[1:]
-    # join multi-line values by detecting key prefix
     curr_key = None
     for ln in lines:
         m = re.match(r"^([^\:]+)\s*:\s*(.*)$", ln)
@@ -175,15 +172,12 @@ def parse_setanketa_text(text: str):
                 curr_key = found
                 out[curr_key] = val
                 continue
-        # If not key:value, append to previous key (multiline bio)
         if curr_key:
             out[curr_key] = out.get(curr_key, "") + "\n" + ln
-    # Post-process inventory and stats into structures
     if "inventory" in out:
         items = re.split(r"[,\;]| и ", out["inventory"])
         out["inventory"] = [i.strip() for i in items if i.strip()]
     if "stats" in out:
-        # Accept "Сила=8, Ловкость=10" or "Сила:8"
         stats = {}
         parts = re.split(r"[,\;]", out["stats"])
         for p in parts:
@@ -193,7 +187,6 @@ def parse_setanketa_text(text: str):
             if m:
                 stats[m.group(1).strip()] = int(m.group(2))
             else:
-                # fallback: split by whitespace
                 kv = p.strip().split()
                 if len(kv) >= 2 and kv[-1].isdigit():
                     stats[" ".join(kv[:-1])] = int(kv[-1])
@@ -267,10 +260,8 @@ def handle_setanketa(update: Update):
     try:
         user = update.effective_user
         text = (update.message.text or "")
-        # If message contains photo, it may be captioned; but photo handler separate
         parsed = parse_setanketa_text(text)
         prof = get_profile(user.id) or {"user_id": user.id, "username": user.username}
-        # Merge parsed fields
         if "name" in parsed:
             prof["name"] = parsed["name"]
         if "age" in parsed:
@@ -287,11 +278,9 @@ def handle_setanketa(update: Update):
             prof["exp"] = parsed["exp"]
         prof["user_id"] = user.id
         prof["username"] = user.username
-        # Preserve existing photo_id if any
         old = get_profile(user.id)
         if old and old.get("photo_id") and not prof.get("photo_id"):
             prof["photo_id"] = old.get("photo_id")
-        # Save timestamp as 0 if not present; last_photo_time handled by photo handler
         prof["last_photo_time"] = old.get("last_photo_time") if old else 0
         save_profile(prof)
         reply(update, text="Анкета обновлена ✅")
@@ -301,12 +290,10 @@ def handle_setanketa(update: Update):
 
 def handle_photo(update: Update):
     try:
-        # Save user's last sent photo (largest file_id)
         user = update.effective_user
         photos = update.message.photo or []
         if not photos:
             return
-        # largest is last
         photo = photos[-1]
         photo_id = photo.file_id
         ts = int(update.message.date.timestamp()) if update.message.date else 0
@@ -322,7 +309,6 @@ def handle_anketa(update: Update):
         target_prof = None
         if len(parts) > 1:
             target = parts[1].lstrip("@")
-            # find by username
             conn = sqlite3.connect(DB_PATH)
             cur = conn.cursor()
             cur.execute("SELECT user_id FROM profiles WHERE username = ?", (target,))
@@ -349,7 +335,6 @@ def handle_callback_query(update: Update):
     if not cq:
         return
     try:
-        # Acknowledge quickly
         run_coro(bot.answer_callback_query(cq.id))
     except Exception:
         print("Error answering callback:", traceback.format_exc())
@@ -368,17 +353,104 @@ def handle_callback_query(update: Update):
                 pass
             return
         try:
+            has_photo = bool(getattr(cq.message, "photo", None))
             if kind == "bio":
-                run_coro(bot.edit_message_caption(chat_id=cq.message.chat.id, message_id=cq.message.message_id, caption=bio_text(prof), reply_markup=back_button(uid)))
+                content = bio_text(prof)
+                markup = back_button(uid)
             elif kind == "inv":
-                run_coro(bot.edit_message_caption(chat_id=cq.message.chat.id, message_id=cq.message.message_id, caption=inv_text(prof), reply_markup=back_button(uid)))
+                content = inv_text(prof)
+                markup = back_button(uid)
             elif kind == "stats":
-                run_coro(bot.edit_message_caption(chat_id=cq.message.chat.id, message_id=cq.message.message_id, caption=stats_text(prof), reply_markup=back_button(uid)))
+                content = stats_text(prof)
+                markup = back_button(uid)
             elif kind == "exp":
-                run_coro(bot.edit_message_caption(chat_id=cq.message.chat.id, message_id=cq.message.message_id, caption=exp_text(prof), reply_markup=back_button(uid)))
+                content = exp_text(prof)
+                markup = back_button(uid)
             elif kind == "back":
-                # show short profile again; if message had photo, edit caption; else edit text
-                if cq.message.photo:
-                    run_coro(bot.edit_message_caption(chat_id=cq.message.chat.id, message_id=cq.message.message_id, caption=short_profile_text(prof), reply_markup=profile_buttons(uid)))
+                content = short_profile_text(prof)
+                markup = profile_buttons(uid)
+            else:
+                content = "Неизвестная команда."
+                markup = back_button(uid)
+            if has_photo:
+                run_coro(bot.edit_message_caption(chat_id=cq.message.chat.id, message_id=cq.message.message_id, caption=content, reply_markup=markup))
+            else:
+                run_coro(bot.edit_message_text(chat_id=cq.message.chat.id, message_id=cq.message.message_id, text=content, reply_markup=markup))
+        except Exception:
+            print("Error handling callback action:", traceback.format_exc())
+    else:
+        try:
+            run_coro(bot.answer_callback_query(cq.id, text="Неизвестный callback"))
+        except Exception:
+            pass
+
+# ---------- Webhook endpoint ----------
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    try:
+        data = request.get_json(force=True)
+    except Exception as e:
+        print("Invalid JSON in request:", e)
+        return Response("Bad Request", status=400)
+    try:
+        print("INCOMING UPDATE:", json.dumps(data, ensure_ascii=False))
+    except Exception:
+        print("INCOMING UPDATE: <could not serialize update>")
+    try:
+        update = Update.de_json(data, bot)
+    except Exception as e:
+        print("Failed to parse Update:", e)
+        return Response("Bad Request", status=400)
+    try:
+        if update.message:
+            # choose handler by message content and type
+            if update.message.photo and (update.message.caption is None or update.message.caption.strip().lower().startswith("/setanketa") is False):
+                # If photo without setanketa caption, treat as profile photo save
+                handle_photo(update)
+            text = (update.message.text or "") if update.message.text else ""
+            text = text.strip()
+            if text:
+                parts = text.split()
+                cmd = parts[0].split("@")[0]
+                if cmd == "/start":
+                    handle_start(update)
+                elif cmd == "/setanketa" or cmd.lower() == "/setanketa":
+                    handle_setanketa(update)
+                elif cmd == "/anketa":
+                    handle_anketa(update)
                 else:
-                    run_coro(bot.edit_message_text(chat_id=cq.message.chat.id, message_id=cq.message.message_id, text=short
+                    # If message contains JSON or admin commands
+                    # keep backward compatibility: simple JSON save via message body
+                    if text.startswith("{") and "save_profile" in text:
+                        try:
+                            obj = json.loads(text)
+                            data = obj.get("save_profile")
+                            if not data or not data.get("user_id"):
+                                reply(update, text="Некорректный JSON или отсутствует user_id")
+                            else:
+                                save_profile(data)
+                                reply(update, text="Анкета сохранена.")
+                        except Exception as e:
+                            reply(update, text=f"Ошибка парсинга JSON: {e}")
+                    else:
+                        # ignore other texts
+                        pass
+            else:
+                # no text; might be photo handled above
+                pass
+        elif update.callback_query:
+            handle_callback_query(update)
+        else:
+            pass
+    except Exception:
+        print("Error handling update:", traceback.format_exc())
+    return Response("OK", status=200)
+
+# Health check
+@app.route("/", methods=["GET"])
+def index():
+    return "OK"
+
+if __name__ == "__main__":
+    init_db()
+    app.run(host="0.0.0.0", port=PORT)
