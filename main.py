@@ -5,6 +5,8 @@ import random
 import sqlite3
 import asyncio
 import traceback
+import threading
+import concurrent.futures
 from flask import Flask, request, Response
 from telegram import Bot, Update
 
@@ -16,38 +18,40 @@ DB_PATH = "profiles.db"
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN not set in environment variables")
 
-# Semaphore to limit concurrent outbound requests to Telegram
-OUTBOUND_SEMAPHORE = asyncio.Semaphore(4)  # conservative; increase later if stable
-
+# ---------- Bot ----------
 # Create Bot using library default Request implementation
 bot = Bot(token=BOT_TOKEN)
 
 app = Flask(__name__)
 
-# ---------- helper to run async Bot coroutines from sync code ----------
-def run_coro(coro):
+# ---------- Background worker loop + concurrency control ----------
+# Semaphore to limit concurrent outbound requests to Telegram inside worker loop
+OUTBOUND_SEMAPHORE = asyncio.Semaphore(10)  # tune as needed
+
+# Persistent background asyncio loop running in a dedicated thread
+_WORKER_LOOP = asyncio.new_event_loop()
+_WORKER_THREAD = threading.Thread(target=lambda: _WORKER_LOOP.run_forever(), daemon=True)
+_WORKER_THREAD.start()
+
+def run_coro(coro, wait=False, timeout=15):
     """
-    Simple, robust runner: always run coroutine to completion on a fresh loop.
-    This blocks the current thread while the request is sent to Telegram,
-    but avoids errors related to a closed or unusable event loop.
+    Submit coroutine to the persistent background asyncio loop.
+    - wait=False (default): schedule and return concurrent.futures.Future immediately.
+    - wait=True: block until result or timeout seconds and return result (or raise).
+    All coroutines are wrapped with a semaphore to limit concurrency.
     """
-    async def _run():
+    async def _with_sem():
         async with OUTBOUND_SEMAPHORE:
             return await coro
 
-    new_loop = asyncio.new_event_loop()
-    try:
-        asyncio.set_event_loop(new_loop)
-        return new_loop.run_until_complete(_run())
-    finally:
+    fut = asyncio.run_coroutine_threadsafe(_with_sem(), _WORKER_LOOP)
+    if wait:
         try:
-            new_loop.close()
-        except Exception:
-            pass
-        try:
-            asyncio.set_event_loop(None)
-        except Exception:
-            pass
+            return fut.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            fut.cancel()
+            raise
+    return fut
 
 # ---------- DB helpers ----------
 def init_db():
@@ -159,6 +163,7 @@ def handle_roll(update: Update, expr_arg=None):
         if rolls is None:
             run_coro(bot.send_message(chat_id=chat_id, text="Неверный формат или слишком большие числа. Пример: /roll 2d20"))
             return
+        # Schedule send_message in background worker; no blocking by default
         run_coro(bot.send_message(chat_id=chat_id, text=f"🎲 {expr}: {rolls} — сумма {sum(rolls)}"))
     except Exception:
         print("Error in handle_roll:", traceback.format_exc())
