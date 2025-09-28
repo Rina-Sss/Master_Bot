@@ -1,10 +1,17 @@
 name: Keep app awake
+
 on:
   schedule:
-    - cron: '*/15 * * * *'
-  workflow_dispatch:
+    - cron: '*/15 * * * *' # каждые 15 минут
+  workflow_dispatch: {}    # возможность запускать вручную
+
 jobs:
   ping:
     runs-on: ubuntu-latest
     steps:
-      - run: curl -sSf https://YOUR_DOMAIN/ || true
+      - name: Ping app health endpoint
+        run: |
+          set -e
+          URL="https://master-bot-imk8.onrender.com"
+          # делаем запрос, но не помешаем workflow провалиться, если сайт временно недоступен
+          curl -fsS "$URL" || echo "Ping failed (ignored) at $(date)"
