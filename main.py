@@ -1,4 +1,3 @@
-# main.py
 import os
 import re
 import json
@@ -48,7 +47,6 @@ def get_profile(user_id):
         return None
     keys = ["user_id","username","name","age","role","photo_id","inventory","stats","exp","bio"]
     prof = dict(zip(keys, row))
-    # normalize json fields
     try:
         prof["inventory"] = json.loads(prof["inventory"]) if prof["inventory"] else []
     except:
@@ -103,10 +101,13 @@ def roll_expression(expr: str):
     rolls = [random.randint(1, sides) for _ in range(count)]
     return rolls
 
-# ---------- Command handlers (synchronous calls using bot) ----------
+# ---------- Command handlers ----------
 def handle_start(update: Update):
     chat_id = update.effective_chat.id
-    bot.send_message(chat_id=chat_id, text="Привет! Я RPG-бот.\n/roll 2d20 — бросок кубиков\n/анкета — показать свою анкету\n/анкета @username — показать чужую анкету")
+    bot.send_message(
+        chat_id=chat_id,
+        text="Привет! Я RPG-бот.\n/roll 2d20 — бросок кубиков\n/анкета — показать свою анкету\n/анкета @username — показать чужую анкету"
+    )
 
 def handle_roll(update: Update):
     chat_id = update.effective_chat.id
@@ -126,12 +127,13 @@ def handle_profile(update: Update):
     chat_id = update.effective_chat.id
     text = (update.message.text or "").strip()
     parts = text.split()
-    # /анкета or /анкета @username
     if len(parts) > 1:
         target = parts[1].lstrip("@")
-        conn = sqlite3.connect(DB_PATH); cur = conn.cursor()
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
         cur.execute("SELECT user_id FROM profiles WHERE username = ?", (target,))
-        r = cur.fetchone(); conn.close()
+        r = cur.fetchone()
+        conn.close()
         if not r:
             bot.send_message(chat_id=chat_id, text="Анкета не найдена.")
             return
@@ -142,14 +144,19 @@ def handle_profile(update: Update):
         if not prof:
             bot.send_message(chat_id=chat_id, text="У тебя ещё нет анкеты. Пока можно создать локально или через отдельную команду/диалог (реализацию можно добавить).")
             return
-    text_out = f"Имя: {prof.get('name') or '-'}\nВозраст: {prof.get('age') or '-'}\nРоль: {prof.get('role') or '-'}\nОпыт: {prof.get('exp')}\n\nПредыстория:\n{prof.get('bio') or '-'}"
+    text_out = (
+        f"Имя: {prof.get('name') or '-'}\n"
+        f"Возраст: {prof.get('age') or '-'}\n"
+        f"Роль: {prof.get('role') or '-'}\n"
+        f"Опыт: {prof.get('exp')}\n\n"
+        f"Предыстория:\n{prof.get('bio') or '-'}"
+    )
     if prof.get("photo_id"):
         bot.send_photo(chat_id=chat_id, photo=prof.get("photo_id"), caption=text_out)
     else:
         bot.send_message(chat_id=chat_id, text=text_out)
 
-# Placeholder: save profile by JSON message (quick admin tool)
-# Usage: отправь боту в личку JSON с ключом "save_profile": { ... }
+# Quick JSON save (admin helper)
 def handle_json_commands(update: Update):
     if not update.message or not update.message.text:
         return
@@ -171,13 +178,11 @@ def handle_callback_query(update: Update):
     cq = update.callback_query
     if not cq:
         return
-    # отвечаем, чтобы Telegram не показывал "час ожидания"
     try:
         bot.answer_callback_query(cq.id)
-    except Exception:
+    except:
         pass
     data = cq.data or ""
-    # простая распаковка для inv:USERID or stats:USERID
     if ":" in data:
         kind, uid_s = data.split(":", 1)
         try:
@@ -186,7 +191,10 @@ def handle_callback_query(update: Update):
             return
         prof = get_profile(uid)
         if not prof:
-            bot.edit_message_text(chat_id=cq.message.chat_id, message_id=cq.message.message_id, text="Анкета не найдена.")
+            try:
+                bot.edit_message_text(chat_id=cq.message.chat_id, message_id=cq.message.message_id, text="Анкета не найдена.")
+            except:
+                pass
             return
         if kind == "inv":
             inv = prof.get("inventory") or []
@@ -197,10 +205,12 @@ def handle_callback_query(update: Update):
             text = "Статистика:\n" + ("\n".join(f"{k}: {v}" for k,v in stats.items()) if stats else "Нет")
             bot.edit_message_text(chat_id=cq.message.chat_id, message_id=cq.message.message_id, text=text)
     else:
-        # другие callback'и
-        bot.edit_message_text(chat_id=cq.message.chat_id, message_id=cq.message.message_id, text="Нажата кнопка")
+        try:
+            bot.edit_message_text(chat_id=cq.message.chat_id, message_id=cq.message.message_id, text="Нажата кнопка")
+        except:
+            pass
 
-# ---------- Webhook endpoint (manual routing) ----------
+# ---------- Webhook endpoint ----------
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
@@ -211,5 +221,31 @@ def webhook():
         return Response("Bad Request", status=400)
 
     try:
-        # message routing
-        if update.message
+        if update.message:
+            text = update.message.text or ""
+            if text.startswith("/start"):
+                handle_start(update)
+            elif text.startswith("/roll"):
+                handle_roll(update)
+            elif text.startswith("/анкета"):
+                handle_profile(update)
+            else:
+                handle_json_commands(update)
+        elif update.callback_query:
+            handle_callback_query(update)
+        else:
+            pass
+    except Exception as e:
+        print("Error handling update:", e)
+
+    return Response("OK", status=200)
+
+# Health check
+@app.route("/", methods=["GET"])
+def index():
+    return "OK"
+
+# ---------- Start ----------
+if __name__ == "__main__":
+    init_db()
+    app.run(host="0.0.0.0", port=PORT)
