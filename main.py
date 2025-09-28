@@ -8,12 +8,6 @@ import traceback
 from flask import Flask, request, Response
 from telegram import Bot, Update
 
-# Try Request import from possible locations
-try:
-    from telegram.request import Request
-except Exception:
-    from telegram.utils.request import Request
-
 # ---------- CONFIG ----------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 PORT = int(os.environ.get("PORT", 5000))
@@ -22,33 +16,16 @@ DB_PATH = "profiles.db"
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN not set in environment variables")
 
-# ---------- Telegram Request / pool settings ----------
-REQUEST_POOL_SIZE = 40
-REQUEST_POOL_TIMEOUT = 60
-REQUEST_CONNECT_TIMEOUT = 10.0
-REQUEST_READ_TIMEOUT = 30.0
-
-request_session = Request(
-    con_pool_size=REQUEST_POOL_SIZE,
-    pool_timeout=REQUEST_POOL_TIMEOUT,
-    connect_timeout=REQUEST_CONNECT_TIMEOUT,
-    read_timeout=REQUEST_READ_TIMEOUT
-)
-
 # Semaphore to limit concurrent outbound requests to Telegram
 OUTBOUND_SEMAPHORE = asyncio.Semaphore(20)
 
-# Create Bot with custom Request
-bot = Bot(token=BOT_TOKEN, request=request_session)
+# Create Bot using library default Request implementation
+bot = Bot(token=BOT_TOKEN)
 
 app = Flask(__name__)
 
 # ---------- helper to run async Bot coroutines from sync code ----------
 def run_coro(coro):
-    """
-    Run coroutine from synchronous context with an outbound semaphore.
-    If an event loop is running, schedule a task; otherwise run and wait.
-    """
     async def _with_sem():
         async with OUTBOUND_SEMAPHORE:
             return await coro
